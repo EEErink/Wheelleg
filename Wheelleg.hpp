@@ -145,6 +145,7 @@ depends:
 === END MANIFEST === */
 // clang-format on
 
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -168,12 +169,12 @@ depends:
 #include "timebase.hpp"
 #include "SuperPower.hpp"
 #define GRAVITY 9.79f
-
+#define UI_LAYER_CHASSIS 1
 /*/////////////////////////////////WARNING\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*/
 /*---------------------------您正在审阅高达车的代码---------------------------*/
 class Wheelleg : public LibXR::Application {
  public:
-  enum class WheellegEvent : uint8_t {
+enum class WheellegEvent : uint8_t {
     SET_MODE_RELAX,
     SET_MODE_STAND,
     SET_MODE_ROTOR,
@@ -196,14 +197,14 @@ class Wheelleg : public LibXR::Application {
   };
 
   struct WheellegParam {
-    std::array<LibXR::CycleValue<float>, 4>
-        mech_zero;                   /*关节电机偏置零点 单位rad*/
-    std::array<float, 2> static_L0;  /*基本腿长 单位m*/
-    std::array<float, 2> static_F0;  /*基本推力 单位N */
-    float wheel_radius;              /*轮子半径 单位m*/
-    float max_speed;                 /*最大速度 单位m/s*/
-    float K_Poly_Coefficient[40][6]; /*K矩阵*/
-  };
+    std::array<LibXR::CycleValue<float>, 4> mech_zero; /*关节电机偏置零点 单位rad*/
+    std::array<float, 2> static_L0; /*基本腿长 单位m*/
+    std::array<float, 2> static_F0; /*基本推力 单位N */
+    float wheel_radius;  /*轮子半径 单位m*/
+    float max_speed;  /*最大速度 单位m/s*/
+    float K_Poly_Coefficient[40][6];  /*K矩阵*/
+    };
+
 
   /**
    * @brief wheelleg 类的构造函数
@@ -229,6 +230,7 @@ class Wheelleg : public LibXR::Application {
    */
     Wheelleg(LibXR::HardwareContainer& hw, LibXR::ApplicationManager& app,CMD& cmd,
              Referee& referee,
+             SuperPower& superpower,
              uint32_t task_stack_depth,
         LegVmc::Param vmc_left_param,
         LegVmc::Param vmc_right_param,
@@ -252,8 +254,9 @@ class Wheelleg : public LibXR::Application {
           theta_pid_left_(pid_theta_left_param),
           theta_pid_right_(pid_theta_right_param),
           roll_pid_(pid_roll_param),
+          cmd_(&cmd),
           referee_(&referee),
-          cmd_(&cmd)
+          superpower_(&superpower)
       {
   this->hip_motor_.at(0) =
       new DMMotor(hw,app,hip_leftfront_param);
@@ -264,8 +267,8 @@ class Wheelleg : public LibXR::Application {
   this->hip_motor_.at(3) =
       new DMMotor(hw,app,hip_rightback_param);
 
-    this->wheel_motor_.at(0) = wheel_left;
-    this->wheel_motor_.at(1) = wheel_right;
+  this->wheel_motor_.at(0) = wheel_left;
+  this->wheel_motor_.at(1) = wheel_right;
 
     for (int i = 0; i < 4; i++) {
       dmmotor_cmd_[i].mode = Motor::ControlMode::MODE_MIT;
@@ -286,13 +289,20 @@ class Wheelleg : public LibXR::Application {
     },this);
   cmd_->GetEvent().Register(CMD::CMD_EVENT_LOST_CTRL, lost_ctrl_callback);
 
-    /*模式切换事件回调*/
-    auto event_callback = LibXR::Callback<uint32_t>::Create(
-        [](bool in_isr, Wheelleg* wheelleg, uint32_t event_id) {
-          UNUSED(in_isr);
-          wheelleg->EventHandler(event_id);
-        },
-        this);
+  /*模式切换事件回调*/
+  auto event_callback = LibXR::Callback<uint32_t>::Create(
+    [](bool in_isr, Wheelleg* wheelleg, uint32_t event_id) {
+     UNUSED(in_isr);
+    wheelleg->EventHandler(event_id);
+    },this);
+
+    void (*InitUi)(Wheelleg*) = [](Wheelleg* wheelleg) {
+      wheelleg->InitUi();
+    };
+      auto InitUi_ = LibXR::Timer::CreateTask(InitUi, this, 35);
+      LibXR::Timer::Add(InitUi_);
+      LibXR::Timer::Start(InitUi_);
+
 
 
    event_handler_.Register(static_cast<uint32_t>(WheellegEvent::SET_MODE_RELAX), event_callback);
@@ -316,40 +326,12 @@ class Wheelleg : public LibXR::Application {
         LibXR::Topic::ASyncSubscriber<float> yaw_sub("yawmotor_angle");
         LibXR::Topic::ASyncSubscriber<float> yaw_dot_sub("yawmotor_dot");
 
-    cmd_sub.StartWaiting();
-    eulr_sub.StartWaiting();
-    gyro_sub.StartWaiting();
-    accl_sub.StartWaiting();
-    yaw_sub.StartWaiting();
-    yaw_dot_sub.StartWaiting();
-
-    while (true) {
-      auto last_time = LibXR::Timebase::GetMilliseconds();
-      if (cmd_sub.Available()) {
-        wheelleg->chassis_cmd_ = cmd_sub.GetData();
         cmd_sub.StartWaiting();
-      }
-      if (eulr_sub.Available()) {
-        wheelleg->eulr_ = eulr_sub.GetData();
         eulr_sub.StartWaiting();
-      }
-      if (gyro_sub.Available()) {
-        wheelleg->gyro_ = gyro_sub.GetData();
         gyro_sub.StartWaiting();
-      }
-
-      if (accl_sub.Available()) {
-        wheelleg->accl_ = accl_sub.GetData();
         accl_sub.StartWaiting();
-      }
-      if (yaw_sub.Available()) {
-        wheelleg->yaw_ = yaw_sub.GetData();
         yaw_sub.StartWaiting();
-      }
-      if (yaw_dot_sub.Available()) {
-        wheelleg->yaw_dot_ = yaw_dot_sub.GetData();
         yaw_dot_sub.StartWaiting();
-      }
 
         while (true) {
 
@@ -388,7 +370,6 @@ class Wheelleg : public LibXR::Application {
             LibXR::Thread::SleepUntil(last_time,2);
         }
     }
-  }
 
   /**
    * @brief 更新反馈和状态量
@@ -410,7 +391,7 @@ void UpdateFeedback() {
     this->hip_motor_[3]->Update();
 
 
-    bool wheel_online_now = wheel_motor_[0]->GetFeedback().online and wheel_motor_[1]->GetFeedback().online;
+    bool wheel_online_now = wheel_motor_[0]->GetFeedback().online or wheel_motor_[1]->GetFeedback().online;
     if (!wheel_online_now) {
       wheel_online_start_time_ = 0;
       body_argum_.C620_ready_flag_ = false;
@@ -515,32 +496,49 @@ void UpdateFeedback() {
     leg_argum_[1].x_dot_pred =
           body_argum_.x_dot_hat + this->gyro_.z * 0.23f + accl_.y * dt_ * GRAVITY;
 
-    body_argum_.limit_power = 200;
+    body_argum_.limit_power = 50;
+    if (body_argum_.limit_power ==0 or body_argum_.limit_power >=180 )
+    {    body_argum_.limit_power = 50;}
+
     /*电机粗略功率模型:角速度*力矩*3^(0.5)*K  M3508:K=1 LK9025(35T):K=3 出自山海机甲开源 */
-    body_argum_.est_power=1.732f*( fabsf(wheel_motor_[0]->GetFeedback().torque*0.3f/19.2f*15.765f*wheel_motor_[0]->GetFeedback().omega/15.765f) +
-        fabsf(wheel_motor_[1]->GetFeedback().torque*0.3f/19.2f*15.765f*wheel_motor_[1]->GetFeedback().omega/15.765f));
+    // body_argum_.est_power=1.732f*( fabsf(wheel_motor_[0]->GetFeedback().torque*0.3f/19.2f*15.765f*wheel_motor_[0]->GetFeedback().omega/15.765f) +
+    //     fabsf(wheel_motor_[1]->GetFeedback().torque*0.3f/19.2f*15.765f*wheel_motor_[1]->GetFeedback().omega/15.765f));
     /* 速度限制 设腿长最长时速度约1m/s 腿长0.15时最大速度约2.6 由交龙第一视角得出(根据自家超电)*/
+
     body_argum_.expspeed= std::clamp(0.5f/(leg_argum_[0].L0+leg_argum_[1].L0+1.5f)+1.7f,0.5f,param_.max_speed);
     if(chassis_cmd_.self_define == CMD::ChasStat::BOOST)
     {
     body_argum_.expspeed *= 1.4f;}
-    leg_argum_[0].Delta_F =std::clamp(param_.static_F0[0]-10.0f - 100.0f * (leg_argum_[0].L0 - 0.11f),0.0f,param_.static_F0[0]);
-    leg_argum_[1].Delta_F =std::clamp(param_.static_F0[1]-10.0f - 100.0f * (leg_argum_[1].L0 - 0.11f),0.0f,param_.static_F0[1]);
+    // 腿长线性前馈：F0 = 166*L0 + 95
+
+    body_argum_.cap_energy = GetCapEnergy()/256.0f;
+
+    // 根据能量线性插值调整速度
+    float min_speed = 0.14f * sqrtf(body_argum_.limit_power);
+    float max_speed_limit = param_.max_speed;
+
+    if (body_argum_.cap_energy <= 0.3f) {
+        body_argum_.expspeed = std::min(body_argum_.expspeed, min_speed);
+    } else if (body_argum_.cap_energy < 0.6f) {
+        // 0.3-0.6之间线性插值
+        float energy_ratio = (body_argum_.cap_energy - 0.3f) / 0.3f;
+        float speed_limit = min_speed + (max_speed_limit - min_speed) * energy_ratio;
+        body_argum_.expspeed = std::min(body_argum_.expspeed, speed_limit);
+    }
+
+
+    float L0_feedforward_left = 166.0f * leg_argum_[0].L0 + 95.0f;
+    float L0_feedforward_right = 166.0f * leg_argum_[1].L0 + 95.0f;
+
+    leg_argum_[0].Delta_F =std::clamp(L0_feedforward_left,0.0f,param_.static_F0[0]+150.0f);
+    leg_argum_[1].Delta_F =std::clamp(L0_feedforward_right,0.0f,param_.static_F0[1]+150.0f);
 }
 
   /**
    * @brief 计算输出
    *
    */
-  void Calculate() {
-    /* 获取目标量 */
-    switch (current_mode_) {
-      case RELAX:
-      case STAND:
-        /*速度规划*/
-        /* 命令应该控加速度而不是速度? */
-        /* 平移速度计算 */
-        /* 0.002为最大加速度 即500hz*0.002 梯度式递增减 */
+void Calculate() {
 
   /* 计算目标位移量 */
   switch (current_mode_) {
@@ -624,6 +622,8 @@ void UpdateFeedback() {
     }
   }
 
+  // leg_argum_[0].onground_flag_ = true;
+  // leg_argum_[1].onground_flag_ = true;
 
   if (current_mode_ == RELAX || current_mode_ == ROTOR || current_mode_ == STAND|| current_mode_ == JUMP) {
   /* 处理k矩阵 */
@@ -649,13 +649,13 @@ void UpdateFeedback() {
   // body_argum_.LQR_K[30]=0.0f;
 
 /*交龙24青工会摩擦圆限制*/
-if (fabsf(body_argum_.x_dot_hat*gyro_.z)>6.5f)
+if (fabsf(body_argum_.x_dot_hat*gyro_.z)>7.f)
 {
   for (int i = 0; i < 4; i++){
-      body_argum_.LQR_K[0+i*10] /= 2.0f;
-      body_argum_.LQR_K[1+i*10] /= 2.0f;
-      body_argum_.LQR_K[2+i*10] /= 2.0f;
-      body_argum_.LQR_K[3+i*10] /= 2.0f;}
+      body_argum_.LQR_K[0+i*10] /= (fabsf(body_argum_.x_dot_hat*gyro_.z))/10.0f;
+      body_argum_.LQR_K[1+i*10] /= (fabsf(body_argum_.x_dot_hat*gyro_.z))/10.0f;
+      body_argum_.LQR_K[2+i*10] /= (fabsf(body_argum_.x_dot_hat*gyro_.z))/5.0f;
+      body_argum_.LQR_K[3+i*10] /= (fabsf(body_argum_.x_dot_hat*gyro_.z))/5.0f;}
 }
 
     /* 处理平衡点 应该与腿长和弹舱剩余弹量做拟合 */
@@ -808,21 +808,22 @@ SetMode(STAIR);
     leg_argum_[1].Delta_L0 = RampTowards(leg_argum_[1].Delta_L0, leg_argum_[1].target_delta_l0, 0.0005f);
   leg_argum_[0].Delta_L0 =  std::clamp(leg_argum_[0].Delta_L0,-0.06f,0.4f-param_.static_L0[0]);
   leg_argum_[1].Delta_L0 =  std::clamp(leg_argum_[1].Delta_L0,-0.06f,0.4f-param_.static_L0[1]);
+  /* 侧向惯性力矩补偿= (机体质量*0.5+腿质心高度系数*腿长*腿重)*前进平移速度*旋转角速度*腿长/两轮距离, 注意角速度极性 */
+  /* 单侧腿推力 = roll推力(交龙使用单环直接出力)+机体加腿静态重力+侧向惯性力矩补偿+pid控制默认腿长 */
 
 
     leglength_pid_left_.SetOutLimit(param_.static_F0[0]+100);
     leglength_pid_right_.SetOutLimit(param_.static_F0[1]+100);
 
     body_argum_.roll_out =roll_pid_.Calculate(0.0f, eulr_.rol, gyro_.y, dt_);
-  /* 侧向惯性力矩补偿= (机体质量*0.5+腿质心高度系数*腿长*腿重)*前进平移速度*旋转角速度*腿长/两轮距离, 注意角速度极性 */
-  /* 单侧腿推力 = roll推力(交龙使用单环直接出力)+机体加腿静态重力+侧向惯性力矩补偿+pid控制默认腿长 */
+
   leg_argum_[0].F0 = leg_argum_[0].Delta_F +
     leglength_pid_left_.Calculate(leg_argum_[0].Delta_L0 + param_.static_L0[0], leg_argum_[0].L0,leg_argum_[0].d_L0, dt_) -
-    gyro_.z*body_argum_.x_dot_hat*(leg_argum_[0].L0)/0.23f*(10.0f+0.6f*0.9f*(leg_argum_[0].L0+param_.wheel_radius)) +  body_argum_.roll_out;
+    gyro_.z*body_argum_.x_dot_hat*(leg_argum_[0].L0)/0.23f*(12.0f+0.6f*0.9f*(leg_argum_[0].L0+param_.wheel_radius)) +  body_argum_.roll_out;
 
   leg_argum_[1].F0 = leg_argum_[1].Delta_F +
     leglength_pid_right_.Calculate(leg_argum_[1].Delta_L0 + param_.static_L0[1], leg_argum_[1].L0,leg_argum_[1].d_L0, dt_) +
-    gyro_.z*body_argum_.x_dot_hat*(leg_argum_[1].L0)/0.23f*(10.0f+0.6f*0.9f*(leg_argum_[1].L0+param_.wheel_radius)) -  body_argum_.roll_out;
+    gyro_.z*body_argum_.x_dot_hat*(leg_argum_[1].L0)/0.23f*(12.0f+0.6f*0.9f*(leg_argum_[1].L0+param_.wheel_radius)) -  body_argum_.roll_out;
 /*跳跃的支持力有别于其他模式的支持力*/
 if(current_mode_==JUMP){
 
@@ -847,7 +848,7 @@ else if(body_argum_.jump_time < 370000)
 {
   leg_argum_[0].F0 = vmc_left_->MaxFnSolve(30) + leg_argum_[0].spring_force;
 leg_argum_[1].F0 = vmc_right_->MaxFnSolve(30) + leg_argum_[1].spring_force;
-}else if(body_argum_.jump_time < 515000)
+}else if(body_argum_.jump_time < 520000)
 /*起跳收腿 增加离地高度*/
 {
 
@@ -859,7 +860,13 @@ else{  leg_argum_[0].F0 = vmc_left_->MaxFnSolve(-23) + leg_argum_[0].spring_forc
 if (leg_argum_[1].L0< 0.14){  leg_argum_[1].F0 = vmc_right_->MaxFnSolve(-7) + leg_argum_[1].spring_force;}
 else{  leg_argum_[1].F0 = vmc_right_->MaxFnSolve(-23) + leg_argum_[1].spring_force;}
 
+// }else if(body_argum_.jump_time < 1000000){
+//   leg_argum_[0].F0 = vmc_left_->MaxFnSolve(8) + leg_argum_[0].spring_force;
+// leg_argum_[1].F0 = vmc_right_->MaxFnSolve(8) + leg_argum_[1].spring_force;
 
+//   if (body_argum_.jump_time>80000 and( leg_argum_[0].L0<0.16f or leg_argum_[1].L0<0.16f) )
+// {  body_argum_.jump_time =0;
+//    SetMode(STAND);}
 
 }else if(body_argum_.jump_time < 750000)
 {
@@ -907,6 +914,12 @@ else{/*进入普通模式 伸腿缓冲*/
    SetMode(STAND);}
 }
 
+  /* 侧向惯性力矩补偿= (机体质量*0.5+腿质心高度系数*腿长*腿重)*前进平移速度*旋转角速度*腿长/两轮距离, 注意角速度极性 */
+  /*单侧腿推力 = roll推力(交龙使用单环直接出力矩)+机体加腿静态重力+侧向惯性力矩补偿+pid控制默认腿长 */
+  // leg_argum_[0].F0 = param_.static_F0[0] + leglength_pid_left_.Calculate(leg_argum_[0].Delta_L0, leg_argum_[0].L0, dt_)
+  //     - gyro_.z*body_argum_.x_dot_hat*(leg_argum_[0].L0+param_.wheel_radius)/0.23f*(8+0.5*0.7*leg_argum_[0].L0);
+  // leg_argum_[1].F0 = param_.static_F0[1] + leglength_pid_right_.Calculate(leg_argum_[1].Delta_L0, leg_argum_[1].L0, dt_)
+  //     + gyro_.z*body_argum_.x_dot_hat*(leg_argum_[1].L0+param_.wheel_radius)/0.23f*(8+0.5*0.7*leg_argum_[1].L0);
 
   // body_argum_.yaw_force = 0.0f;
   /* 轮毂输出计算 */
@@ -945,7 +958,7 @@ else{/*进入普通模式 伸腿缓冲*/
   hip_motor_out_[2] = leg_argum_[1].T1;
   hip_motor_out_[3] = leg_argum_[1].T2;
 
-    } else if (current_mode_ == RESET) {
+  } else if (current_mode_ == RESET) {
       /* 愚蠢的恢复模式 */
     leglength_pid_left_.SetOutLimit(300);
     leglength_pid_right_.SetOutLimit(300);
@@ -1149,6 +1162,7 @@ leg_argum_[1].F0 =  -20.0f+leglength_pid_right_.Calculate(
       leg_argum_[1].F0 = 1.5f*leglength_pid_right_.Calculate(leg_argum_[1].Delta_L0, leg_argum_[1].L0, leg_argum_[1].d_L0, dt_);
 
 
+
              auto result3 = vmc_left_->VMCinserve(-leg_argum_[0].phi1_, -leg_argum_[0].phi4_, -leg_argum_[0].Tp,
                 leg_argum_[0].F0-leg_argum_[0].spring_force);
              leg_argum_[0].T1 = std::get<0>(result3);
@@ -1171,8 +1185,8 @@ leg_argum_[1].F0 =  -20.0f+leglength_pid_right_.Calculate(
      * @brief out输出
      */
 void Control() {
-   wheel_motor_out_[0] = std::clamp(wheel_motor_out_[0], -6.00f, 6.00f);
-   wheel_motor_out_[1] = std::clamp(wheel_motor_out_[1], -6.00f, 6.00f);
+  //  wheel_motor_out_[0] = std::clamp(wheel_motor_out_[0], -6.00f, 6.00f);
+  //  wheel_motor_out_[1] = std::clamp(wheel_motor_out_[1], -6.00f, 6.00f);
    hip_motor_out_[0] = std::clamp(hip_motor_out_[0], -35.0f, 35.0f);
    hip_motor_out_[1] = std::clamp(hip_motor_out_[1], -35.0f, 35.0f);
    hip_motor_out_[2] = std::clamp(hip_motor_out_[2], -35.0f, 35.0f);
@@ -1282,17 +1296,150 @@ void Control() {
         {this->hip_motor_[i]->Enable();}
         else{this->hip_motor_[i]->ClearError();}}
 
+      // this->wheel_motor_[0]->Relax();
+      // this->wheel_motor_[1]->Relax();
+      // hip_motor_[0]->MITControl(0,0,0,0,0);
+      // hip_motor_[1]->MITControl(0,0,0,0,0);
+      // hip_motor_[2]->MITControl(0,0,0,0,0);
+      // hip_motor_[3]->MITControl(0,0,0,0,0);
 
     break;
 }
 }
 
+void InitUi() {
+
+    const uint16_t id = referee_->GetRobotID();
+    const uint16_t client = referee_->GetClientID(id);
+    Referee::UIFigureOp ADD_OP = Referee::UIFigureOp::UI_OP_MODIFY;
+    if(this->ui_dyn_step_%20==0){ADD_OP = Referee::UIFigureOp::UI_OP_ADD;}
+
+
+    switch (ui_step_) {
+        case 0: {
+
+            const char* mode_str = "RELX";
+            switch (current_mode_) {
+                case Mode::RELAX: mode_str = "RELX"; break;
+                case Mode::RESET: mode_str = "REST"; break;
+                case Mode::ROTOR: mode_str = "ROTO"; break;
+                case Mode::STAND: mode_str = "FOLW"; break;
+                case Mode::JUMP:  mode_str = "JUMP"; break;
+                case Mode::STAIR: mode_str = "STAI"; break;
+                default: break;
+
+            }
+
+            Referee::UICharacter char_fig{};
+            referee_->FillCharacter(char_fig, "WM", ADD_OP, UI_LAYER_CHASSIS,
+                                    Referee::UIColor::UI_COLOR_CYAN, 27,
+                                    2, 1345, 764, mode_str);
+            referee_->SendUICharacter(id, client, char_fig);
+            break;
+        }
+        case 1: {
+
+            uint16_t dot_x = static_cast<uint16_t>(
+                1920 / 2 + 260 * sinf(body_argum_.yaw_));
+            uint16_t dot_y = static_cast<uint16_t>(
+                1080 / 2 + 260 * cosf(body_argum_.yaw_));
+            Referee::UIFigure fig{};
+            referee_->FillCircle(fig, "WY", ADD_OP, UI_LAYER_CHASSIS,
+                                 Referee::UIColor::UI_COLOR_CYAN,
+                                   7, dot_x, dot_y,
+                                 20);
+            referee_->SendUIFigure(id, client, fig);
+            break;
+        }
+        case 2: {
+
+            constexpr uint16_t PIT_LEN = 120;
+            uint16_t pit_cx = static_cast<uint16_t>(1690 - PIT_LEN * sinf(-body_argum_.pit_-1.57f));
+            uint16_t pit_cy = static_cast<uint16_t>(480 + PIT_LEN * cosf(-body_argum_.pit_-1.57f));
+            uint16_t pit_x2 = static_cast<uint16_t>(1690 + PIT_LEN * sinf(-body_argum_.pit_-1.57f));
+            uint16_t pit_y2 = static_cast<uint16_t>(480 - PIT_LEN * cosf(-body_argum_.pit_-1.57f));
+            Referee::UIFigure pit_fig{};
+            referee_->FillLine(pit_fig, "WP", ADD_OP, UI_LAYER_CHASSIS,
+                               Referee::UIColor::UI_COLOR_CYAN, 2,
+                               pit_cx, pit_cy, pit_x2, pit_y2);
+            referee_->SendUIFigure(id, client, pit_fig);
+            break;
+        }
+        case 3: {
+
+            uint16_t leg_x1 = 1690;
+            uint16_t leg_y1 = 480;
+
+            float leg_px = leg_argum_[0].L0 * 400;
+            uint16_t leg_x2 = static_cast<uint16_t>(leg_x1 - leg_px * sinf(leg_argum_[0].theta));
+            uint16_t leg_y2 = static_cast<uint16_t>(leg_y1 - leg_px * cosf(leg_argum_[0].theta));
+            Referee::UIFigure leg_fig{};
+            referee_->FillLine(leg_fig, "WL", ADD_OP, UI_LAYER_CHASSIS,
+                               Referee::UIColor::UI_COLOR_ORANGE, 3,
+                               leg_x1, leg_y1, leg_x2, leg_y2);
+            referee_->SendUIFigure(id, client, leg_fig);
+            break;
+        }
+        case 4: {
+
+            uint16_t leg_x3 = 1700;
+            uint16_t leg_y3 = 480;
+            float leg_px1 = leg_argum_[1].L0 * 400;
+            uint16_t leg_x4 = static_cast<uint16_t>(leg_x3 - leg_px1 * sinf(leg_argum_[1].theta));
+            uint16_t leg_y4 = static_cast<uint16_t>(leg_y3 - leg_px1 * cosf(leg_argum_[1].theta));
+            Referee::UIFigure leg_fig{};
+            referee_->FillLine(leg_fig, "WR", ADD_OP, UI_LAYER_CHASSIS,
+                               Referee::UIColor::UI_COLOR_GREEN, 3,
+                               leg_x3, leg_y3, leg_x4, leg_y4);
+            referee_->SendUIFigure(id, client, leg_fig);
+            break;
+        }
+        case 5: {
+            Referee::UIFigure line_fig{};
+            referee_->FillLine(line_fig, "WSL", ADD_OP, UI_LAYER_CHASSIS,
+                               Referee::UIColor::UI_COLOR_CYAN,  1,
+                               400, 140, 560, 500);
+            referee_->SendUIFigure(id, client, line_fig);
+            break;
+        }
+        case 6: {
+
+            Referee::UIFigure line_fig{};
+            referee_->FillLine(line_fig, "WSR", ADD_OP, UI_LAYER_CHASSIS,
+                               Referee::UIColor::UI_COLOR_CYAN,  1,
+                               1420, 140, 1360, 500);
+            referee_->SendUIFigure(id, client, line_fig);
+            this->ui_dyn_step_  = (this->ui_dyn_step_+1)%20;
+            break;
+
+        }
+
+        case 7 :
+      {
+        Referee::UIFigure spfig{};
+        Referee::UIColor cap_state;
+        if (body_argum_.cap_energy<0.35f){cap_state = Referee::UIColor::UI_COLOR_ORANGE;}
+        else {cap_state = Referee::UIColor::UI_COLOR_CYAN;}
+        referee_->FillLine(spfig, "SP", ADD_OP, UI_LAYER_CHASSIS,
+                               cap_state,  20,
+                               400, 200, static_cast<uint16_t>(400+1120*body_argum_.cap_energy), 200);
+    referee_->SendUIFigure(id, client, spfig);
+      }
+        default:
+            break;
+    }
+
+
+    this->ui_step_ = (this->ui_step_+1)%8;
+
+
+}
 
   /**
    * @brief 获取底盘的事件处理器
    * @return LibXR::Event& 事件处理器的引用
    */
-  LibXR::Event& GetEvent() { return event_handler_; }
+    LibXR::Event& GetEvent() { return event_handler_; }
 
   /**
    * @brief  事件处理器，根据传入的事件ID执行相应操作
@@ -1310,7 +1457,6 @@ void Control() {
         }
 
     }
-  }
 
 void SetMode(Mode mode) {
     if (mode == current_mode_) {return;}
@@ -1339,16 +1485,65 @@ void SetMode(Mode mode) {
      current_mode_ = mode;
 }
 
+uint8_t GetCapEnergy() {
+    if (superpower_ != nullptr) {
+        return superpower_->GetCapEnergy();
+    }
+    return 0;
+}
 
+void OnMonitor() override {}
 
+float AdaptFilter(float wz, float gyro_z, float speed, float accl, float dt_) {
+  adaptfilter_argum_.xhatminus = adaptfilter_argum_.xhat + accl * dt_;
+  adaptfilter_argum_.error = fabs(wz - gyro_z);
+  adaptfilter_argum_.k1 = 0.00182238811503557f * powf(M_E, 8.78806145711193f * adaptfilter_argum_.error / 3.0f);
+  adaptfilter_argum_.k1 = std::clamp(adaptfilter_argum_.k1, 0.0f, 1.0f);
+  adaptfilter_argum_.xhat = speed + adaptfilter_argum_.k1 * (adaptfilter_argum_.xhatminus - speed);
+  return adaptfilter_argum_.xhat;
+}
 
+float RangeAnglePI(float angle) {
+  while (angle > M_PI) {
+    angle -= M_2PI;
+  }
+  while (angle < -M_PI) {
+    angle += M_2PI;
+  }
+  return angle;
+}
 
- void OnMonitor() override {}
+float RampTowards(float current, float target, float max_step) {
+  float diff = target - current;
+  if (diff > max_step) {
+    return current + max_step;
+  }
+  if (diff < -max_step) {
+    return current - max_step;
+  }
+  return target;
+}
+
+float RampBack(float current, float target, float max_step) {
+  float diff = fabsf(target - current);
+  if (diff > max_step) {
+    return current - max_step;
+  }
+  return target;
+}
+
+float RampForaward(float current, float target, float max_step) {
+  float diff = fabsf(target - current);
+  if (diff > max_step) {
+    return current + max_step;
+  }
+  return target;
+}
 
  private:
-  WheellegParam param_;
-  Mode current_mode_ = RELAX;
-  LibXR::Event event_handler_;
+    WheellegParam param_;
+    Mode current_mode_ = RELAX;
+    LibXR::Event event_handler_;
 
     LegVmc *vmc_left_;
     LegVmc *vmc_right_;
@@ -1359,7 +1554,6 @@ void SetMode(Mode mode) {
     LibXR::PID<float> roll_pid_;
     float tor1_,tor2_;
     float error_[2];
-    Referee* referee_;
 
 
     struct {
@@ -1404,6 +1598,7 @@ void SetMode(Mode mode) {
         ErrorCode C620_ready_;
         bool C620_ready_flag_ = false;
         uint8_t stair_phase = 0;
+        float cap_energy =0.0f;
     } body_argum_;
 
   struct {
@@ -1413,16 +1608,18 @@ void SetMode(Mode mode) {
     float xhatminus = 0;
   } adaptfilter_argum_;
 
-  std::array<DMMotor*, 4> hip_motor_;
-  std::array<RMMotor*, 2> wheel_motor_;
-  std::array<float, 4> hip_motor_out_ = {0, 0, 0, 0};
-  std::array<float, 2> wheel_motor_out_ = {0, 0};
+    std::array<DMMotor*, 4> hip_motor_;
+    std::array<RMMotor*, 2> wheel_motor_;
+    std::array<float, 4> hip_motor_out_ = {0, 0, 0, 0};
+    std::array<float, 2> wheel_motor_out_ = {0, 0};
 
     Motor::MotorCmd dmmotor_cmd_[4]{};
     Motor::MotorCmd rmmotor_cmd_[2]{};
 
     CMD::ChassisCMD chassis_cmd_;
     CMD *cmd_;
+    Referee *referee_;
+    SuperPower *superpower_;
     Euler eulr_ = {};
     Vector3 gyro_ = {};
     Vector3 accl_ = {};
@@ -1438,48 +1635,4 @@ void SetMode(Mode mode) {
 
     LibXR::Mutex mutex_;
     LibXR::Thread thread_;
-
-
-  static constexpr uint16_t UI_SCREEN_W = 1920;
-  static constexpr uint16_t UI_SCREEN_H = 1080;
-  static constexpr uint16_t UI_LAYER_CHASSIS = 0;
-  static constexpr uint16_t UI_ORBIT_RADIUS = 260;
-  static constexpr uint16_t UI_ORBIT_DOT_RADIUS = 20;
-  static constexpr uint16_t UI_DEFAULT_WIDTH = 1;
-  static constexpr uint16_t UI_CHAR_WIDTH = 2;
-
-/*---------------工具函数-------------------------*/
-float AdaptFilter(float wz, float gyro_z, float speed,float accl, float dt_){
-  /*预测值*/
-  adaptfilter_argum_.xhatminus = adaptfilter_argum_.xhat + accl * dt_;
-  /*误差大小*/
-  adaptfilter_argum_.error = fabs(wz - gyro_z);
-  /*权重计算*/
-  adaptfilter_argum_.k1 = 0.00182238811503557f * powf(M_E, 8.78806145711193f * adaptfilter_argum_.error / 3.0f);
-  adaptfilter_argum_.k1=std::clamp(adaptfilter_argum_.k1, 0.0f, 1.0f);
-  /*加权求和*/
-  adaptfilter_argum_.xhat = speed + adaptfilter_argum_.k1 * (adaptfilter_argum_.xhatminus - speed);
-  return adaptfilter_argum_.xhat;}
-
-float RangeAnglePI(float angle)
-{ while (angle > M_PI) {
-    angle -= M_2PI;}
-  while (angle < -M_PI) {
-    angle += M_2PI;}
-  return angle;}
-
-float RampTowards(float current, float target, float max_step) {
-    float diff = target - current;
-    if (diff > max_step) {return current + max_step;}
-    if (diff < -max_step) {return current - max_step;}
-    return target;}
-float RampBack(float current, float target, float max_step) {
-    float diff = fabsf(target - current);
-    if (diff > max_step) {return current - max_step;}
-    return target;}
-
-float RampForaward(float current, float target, float max_step) {
-    float diff = fabsf(target - current);
-    if (diff > max_step) {return current + max_step;}
-    return target;}
 };
