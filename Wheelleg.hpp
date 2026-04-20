@@ -150,20 +150,23 @@ depends:
 #include <cmath>
 #include <cstdint>
 #include <memory>
-#include <tuple>
 #include "Referee.hpp"
 #include "app_framework.hpp"
-#include "cycle_value.hpp"
 #include "libxr_def.hpp"
 #include "libxr_time.hpp"
 #include "libxr_type.hpp"
+#include "cycle_value.hpp"
+#include "pid.hpp"
+#include "LegVmc.hpp"
+#include "DMMotor.hpp"
+#include "RMMotor.hpp"
+#include "CMD.hpp"
 #include "message.hpp"
 #include "mutex.hpp"
-#include "pid.hpp"
 #include "semaphore.hpp"
-#include "stm32f407xx.h"
 #include "thread.hpp"
 #include "timebase.hpp"
+#include "SuperPower.hpp"
 #define GRAVITY 9.79f
 
 /*/////////////////////////////////WARNING\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*/
